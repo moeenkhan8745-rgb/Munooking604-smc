@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MUNOOKING604 SMC App</title>
+<style>
+    body { margin:0; background:#0d1117; color:#fff; font-family:Arial, sans-serif; }
+    #chart { width:100%; height:90vh; }
+   .controls { padding:10px; background:#161b22; display:flex; gap:10px; align-items:center; }
+    select, button { padding:8px 12px; background:#21262d; color:#fff; border:1px solid #30363d; border-radius:6px; }
+    button:hover { background:#30363d; cursor:pointer; }
+   .status { padding:10px; background:#161b22; font-size:14px; }
+</style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+<div class="controls">
+    <select id="symbol">
+        <option value="ETHUSDT">ETH/USDT</option>
+        <option value="BTCUSDT">BTC/USDT</option>
+        <option value="SOLUSDT">SOL/USDT</option>
+    </select>
+
+    <select id="timeframe">
+        <option value="1h">1H</option>
+        <option value="4h">4H</option>
+        <option value="1d">1D</option>
+    </select>
+
+    <button id="enableAlert">Enable Alert</button>
+</div>
+
+<div id="chart"></div>
+<div class="status" id="status">Loading...</div>
+
+<script>
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: { background:{color:'#0d1117'}, textColor:'#fff' },
+    grid: { vertLines:{color:'#1c2128'}, horzLines:{color:'#1c2128'} },
+    width: window.innerWidth,
+    height: window.innerHeight * 0.9
+});
+
+const candleSeries = chart.addCandlestickSeries();
+let orderBlocks = [];
+let alertEnabled = false;
+
+async function loadData(symbol, interval){
+    document.getElementById('status').textContent = 'Fetching data...';
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=200`);
+    const data = await res.json();
+
+    const candles = data.map(d => ({
+        time: d[0]/1000,
+        open: parseFloat(d[1]),
+        high: parseFloat(d[2]),
+        low: parseFloat(d[3]),
+        close: parseFloat(d[4])
+    }));
+
+    candleSeries.setData(candles);
+    detectOrderBlocks(candles);
+    document.getElementById('status').textContent = 'Loaded - ' + symbol + ' + interval;
+}
+
+function detectOrderBlocks(candles){
+    // Clear old blocks
+    orderBlocks.forEach(b => chart.removeShape(b));
+    orderBlocks = [];
+
+    for(let i=2; i<candles.length-1; i++){
+        let prev = candles[i-1];
+        let curr = candles[i];
+
+        // Bullish Order Block
+        if(curr.close > curr.open && prev.close < prev.open && curr.high > prev.high){
+            let block = chart.addShape({time:curr.time}, {
+                shape:'rectangle',
+                price: prev.low,
+                price2:
