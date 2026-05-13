@@ -1,0 +1,528 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function generateCandles(base, volatility, trend, count = 120) {
+  const candles = [];
+  let price = base;
+  for (let i = 0; i < count; i++) {
+    const trendBias = trend * (Math.random() * 0.6 + 0.7);
+    const open = price;
+    const change = (Math.random() - 0.48 + trendBias * 0.01) * volatility;
+    const close = open + change;
+    const wick = volatility * (Math.random() * 0.8 + 0.2);
+    const high = Math.max(open, close) + wick * Math.random();
+    const low = Math.min(open, close) - wick * Math.random();
+    const volume = Math.random() * 1000 + 200;
+    candles.push({ open, high, low, close, volume, index: i });
+    price = close;
+  }
+  return candles;
+}
+
+function detectFVG(candles) {
+  const fvgs = [];
+  for (let i = 2; i < candles.length; i++) {
+    const c1 = candles[i - 2];
+    const c3 = candles[i];
+    // Bullish FVG
+    if (c1.high < c3.low) {
+      fvgs.push({ type: "bull", top: c3.low, bottom: c1.high, startIdx: i - 2, endIdx: i, filled: false });
+    }
+    // Bearish FVG
+    if (c1.low > c3.high) {
+      fvgs.push({ type: "bear", top: c1.low, bottom: c3.high, startIdx: i - 2, endIdx: i, filled: false });
+    }
+  }
+  // Mark filled FVGs
+  return fvgs.map((fvg) => {
+    let filled = false;
+    for (let i = fvg.endIdx + 1; i < candles.length; i++) {
+      const c = candles[i];
+      if (fvg.type === "bull" && c.low <= fvg.bottom) { filled = true; break; }
+      if (fvg.type === "bear" && c.high >= fvg.top) { filled = true; break; }
+    }
+    return { ...fvg, filled };
+  });
+}
+
+const ASSETS = [
+  { id: "XAUUSD", label: "GOLD", icon: "Au", base: 3320, vol: 8, trend: 0.4, color: "#FFD700" },
+  { id: "BTCUSD", label: "BTC", icon: "₿", base: 104500, vol: 900, trend: 0.3, color: "#F7931A" },
+  { id: "ETHUSD", label: "ETH", icon: "Ξ", base: 3800, vol: 80, trend: 0.2, color: "#627EEA" },
+  { id: "SOLUSD", label: "SOL", icon: "◎", base: 178, vol: 6, trend: 0.5, color: "#9945FF" },
+  { id: "BNBUSD", label: "BNB", icon: "⬡", base: 710, vol: 18, trend: 0.1, color: "#F3BA2F" },
+  { id: "XRPUSD", label: "XRP", icon: "✕", base: 2.45, vol: 0.08, trend: 0.15, color: "#00AAE4" },
+  { id: "ADAUSD", label: "ADA", icon: "₳", base: 1.12, vol: 0.04, trend: 0.05, color: "#0033AD" },
+  { id: "DOGEUSD", label: "DOGE", icon: "Ð", base: 0.38, vol: 0.012, trend: 0.08, color: "#C2A633" },
+];
+
+const TIMEFRAMES = ["1m", "5m", "15m", "1H", "4H", "1D"];
+
+// ── Chart Renderer ────────────────────────────────────────────────────────────
+function drawChart(canvas, candles, fvgs, viewStart, viewCount, showFVG) {
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;
+  const H = canvas.height;
+  const PAD = { top: 20, bottom: 50, left: 10, right: 80 };
+  const chartW = W - PAD.left - PAD.right;
+  const chartH = H - PAD.top - PAD.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const visibleCandles = candles.slice(viewStart, viewStart + viewCount);
+  if (!visibleCandles.length) return;
+
+  const prices = visibleCandles.flatMap((c) => [c.high, c.low]);
+  const minP = Math.min(...prices);
+  const maxP = Math.max(...prices);
+  const pRange = maxP - minP || 1;
+  const padP = pRange * 0.1;
+  const lo = minP - padP;
+  const hi = maxP + padP;
+
+  const px = (i) => PAD.left + (i / viewCount) * chartW;
+  const py = (p) => PAD.top + ((hi - p) / (hi - lo)) * chartH;
+
+  // Grid
+  ctx.strokeStyle = "rgba(255,255,255,0.04)";
+  ctx.lineWidth = 1;
+  const gridLines = 6;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = PAD.top + (i / gridLines) * chartH;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+  }
+  for (let i = 0; i <= 8; i++) {
+    const x = PAD.left + (i / 8) * chartW;
+    ctx.beginPath(); ctx.moveTo(x, PAD.top); ctx.lineTo(x, PAD.top + chartH); ctx.stroke();
+  }
+
+  // FVG Zones
+  if (showFVG) {
+    fvgs.forEach((fvg) => {
+      const s = fvg.startIdx - viewStart;
+      const e = Math.min(fvg.endIdx + 20, viewCount);
+      if (e < 0 || s > viewCount) return;
+      const x1 = px(Math.max(s, 0));
+      const x2 = px(Math.min(e, viewCount));
+      const y1 = py(fvg.top);
+      const y2 = py(fvg.bottom);
+      if (fvg.filled) {
+        ctx.fillStyle = "rgba(150,150,150,0.05)";
+        ctx.strokeStyle = "rgba(150,150,150,0.2)";
+      } else if (fvg.type === "bull") {
+        ctx.fillStyle = "rgba(0,212,135,0.08)";
+        ctx.strokeStyle = "rgba(0,212,135,0.5)";
+      } else {
+        ctx.fillStyle = "rgba(255,82,82,0.08)";
+        ctx.strokeStyle = "rgba(255,82,82,0.5)";
+      }
+      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.setLineDash([]);
+
+      // FVG label
+      if (!fvg.filled) {
+        ctx.font = "bold 9px monospace";
+        ctx.fillStyle = fvg.type === "bull" ? "rgba(0,212,135,0.9)" : "rgba(255,82,82,0.9)";
+        ctx.fillText(`FVG ${fvg.type === "bull" ? "▲" : "▼"}`, x1 + 4, (y1 + y2) / 2 + 4);
+      }
+    });
+  }
+
+  // Candles
+  const candleW = Math.max(2, (chartW / viewCount) * 0.65);
+  visibleCandles.forEach((c, i) => {
+    const cx = px(i + 0.5);
+    const bull = c.close >= c.open;
+    const color = bull ? "#00D487" : "#FF5252";
+
+    // Wick
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, py(c.high));
+    ctx.lineTo(cx, py(c.low));
+    ctx.stroke();
+
+    // Body
+    const bodyTop = py(Math.max(c.open, c.close));
+    const bodyBot = py(Math.min(c.open, c.close));
+    const bodyH = Math.max(1, bodyBot - bodyTop);
+    ctx.fillStyle = bull ? "#00D487" : "#FF5252";
+    if (!bull) ctx.fillStyle = "#FF5252";
+    ctx.fillRect(cx - candleW / 2, bodyTop, candleW, bodyH);
+  });
+
+  // Price axis
+  ctx.textAlign = "left";
+  ctx.font = "11px 'Courier New', monospace";
+  for (let i = 0; i <= gridLines; i++) {
+    const p = hi - (i / gridLines) * (hi - lo);
+    const y = PAD.top + (i / gridLines) * chartH;
+    ctx.fillStyle = "rgba(180,180,200,0.7)";
+    const label = p >= 1000 ? p.toFixed(0) : p >= 10 ? p.toFixed(2) : p.toFixed(4);
+    ctx.fillText(label, W - PAD.right + 5, y + 4);
+  }
+
+  // Last price line
+  const last = visibleCandles[visibleCandles.length - 1];
+  const lastY = py(last.close);
+  const bull = last.close >= last.open;
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = bull ? "#00D487" : "#FF5252";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(PAD.left, lastY);
+  ctx.lineTo(W - PAD.right, lastY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Last price badge
+  const priceStr = last.close >= 1000 ? last.close.toFixed(2) : last.close >= 10 ? last.close.toFixed(3) : last.close.toFixed(5);
+  ctx.fillStyle = bull ? "#00D487" : "#FF5252";
+  ctx.fillRect(W - PAD.right + 2, lastY - 9, PAD.right - 4, 18);
+  ctx.fillStyle = "#000";
+  ctx.font = "bold 10px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(priceStr, W - PAD.right + (PAD.right - 4) / 2 + 2, lastY + 4);
+  ctx.textAlign = "left";
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const [selectedAsset, setSelectedAsset] = useState(ASSETS[0]);
+  const [selectedTF, setSelectedTF] = useState("1H");
+  const [showFVG, setShowFVG] = useState(true);
+  const [showOnlyUnfilled, setShowOnlyUnfilled] = useState(false);
+  const [candlesMap, setCandlesMap] = useState({});
+  const [fvgMap, setFvgMap] = useState({});
+  const [viewStart, setViewStart] = useState(60);
+  const [viewCount] = useState(60);
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 900, h: 500 });
+  const [hoveredFvg, setHoveredFvg] = useState(null);
+  const [tick, setTick] = useState(0);
+
+  // Generate candle data
+  useEffect(() => {
+    const map = {};
+    const fmap = {};
+    ASSETS.forEach((a) => {
+      const c = generateCandles(a.base, a.vol, a.trend, 200);
+      map[a.id] = c;
+      fmap[a.id] = detectFVG(c);
+    });
+    setCandlesMap(map);
+    setFvgMap(fmap);
+  }, []);
+
+  // Live tick simulation
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCandlesMap((prev) => {
+        const updated = { ...prev };
+        ASSETS.forEach((a) => {
+          const arr = updated[a.id];
+          if (!arr) return;
+          const last = arr[arr.length - 1];
+          const nudge = (Math.random() - 0.49) * a.vol * 0.3;
+          const newClose = last.close + nudge;
+          updated[a.id] = [
+            ...arr.slice(0, -1),
+            { ...last, close: newClose, high: Math.max(last.high, newClose), low: Math.min(last.low, newClose) },
+          ];
+        });
+        return updated;
+      });
+      setTick((t) => t + 1);
+    }, 1200);
+    return () => clearInterval(id);
+  }, []);
+
+  // Canvas resize
+  useEffect(() => {
+    const obs = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        setCanvasSize({ w: e.contentRect.width, h: e.contentRect.height });
+      }
+    });
+    if (containerRef.current) obs.observe(containerRef.current);
+    return () => obs.disconnect();
+  }, []);
+
+  // Redraw
+  useEffect(() => {
+    const candles = candlesMap[selectedAsset.id];
+    if (!candles) return;
+    const allFvgs = fvgMap[selectedAsset.id] || [];
+    const filtered = showOnlyUnfilled ? allFvgs.filter((f) => !f.filled) : allFvgs;
+    drawChart(canvasRef.current, candles, showFVG ? filtered : [], viewStart, viewCount, showFVG);
+  }, [candlesMap, fvgMap, selectedAsset, viewStart, viewCount, showFVG, showOnlyUnfilled, canvasSize, tick]);
+
+  // Drag to scroll
+  const dragRef = useRef(null);
+  const onMouseDown = (e) => { dragRef.current = { x: e.clientX, start: viewStart }; };
+  const onMouseMove = (e) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.x;
+    const candles = candlesMap[selectedAsset.id] || [];
+    const delta = -Math.round((dx / canvasSize.w) * viewCount);
+    const newStart = Math.max(0, Math.min(candles.length - viewCount, dragRef.current.start + delta));
+    setViewStart(newStart);
+  };
+  const onMouseUp = () => { dragRef.current = null; };
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const candles = candlesMap[selectedAsset.id] || [];
+    const delta = Math.sign(e.deltaY) * 3;
+    setViewStart((s) => Math.max(0, Math.min(candles.length - viewCount, s + delta)));
+  };
+
+  // Stats
+  const candles = candlesMap[selectedAsset.id] || [];
+  const lastC = candles[candles.length - 1];
+  const prevC = candles[candles.length - 2];
+  const change = lastC && prevC ? ((lastC.close - prevC.close) / prevC.close) * 100 : 0;
+  const allFvgs = fvgMap[selectedAsset.id] || [];
+  const bullFvgs = allFvgs.filter((f) => f.type === "bull" && !f.filled).length;
+  const bearFvgs = allFvgs.filter((f) => f.type === "bear" && !f.filled).length;
+
+  const priceStr = lastC
+    ? lastC.close >= 1000
+      ? lastC.close.toFixed(2)
+      : lastC.close >= 10
+      ? lastC.close.toFixed(3)
+      : lastC.close.toFixed(5)
+    : "---";
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0A0B0F", color: "#E0E0F0",
+      fontFamily: "'Courier New', monospace", display: "flex", flexDirection: "column",
+    }}>
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(90deg,#0D0E14,#13151F)", borderBottom: "1px solid #1E2030",
+        padding: "0 18px", display: "flex", alignItems: "center", justifyContent: "space-between",
+        height: 52, flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            background: "linear-gradient(135deg,#FFD700,#FF8C00)", borderRadius: 8,
+            padding: "4px 10px", fontWeight: 900, fontSize: 13, color: "#000", letterSpacing: 1,
+          }}>SMC</div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: 2, color: "#FFD700" }}>
+              MUNOOKING604SMC
+            </div>
+            <div style={{ fontSize: 9, color: "#555", letterSpacing: 1 }}>SMART MONEY CONCEPT · AUTO FVG DETECTOR</div>
+          </div>
+        </div>
+
+        {/* Live indicator */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: "50%", background: "#00D487",
+            boxShadow: "0 0 8px #00D487", display: "inline-block",
+            animation: "pulse 1.2s infinite",
+          }} />
+          <span style={{ fontSize: 11, color: "#00D487" }}>LIVE</span>
+        </div>
+      </div>
+
+      {/* Coin Bar */}
+      <div style={{
+        background: "#0D0E14", borderBottom: "1px solid #1A1C28",
+        padding: "6px 18px", display: "flex", gap: 6, overflowX: "auto",
+      }}>
+        {ASSETS.map((a) => {
+          const c = candlesMap[a.id];
+          const last = c?.[c.length - 1];
+          const prev = c?.[c.length - 2];
+          const ch = last && prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+          const active = selectedAsset.id === a.id;
+          return (
+            <button
+              key={a.id}
+              onClick={() => { setSelectedAsset(a); setViewStart(60); }}
+              style={{
+                background: active ? `${a.color}18` : "transparent",
+                border: `1px solid ${active ? a.color : "#1E2030"}`,
+                borderRadius: 8, padding: "5px 12px", cursor: "pointer", color: "#E0E0F0",
+                fontFamily: "inherit", display: "flex", flexDirection: "column",
+                alignItems: "center", minWidth: 74, transition: "all 0.2s",
+              }}
+            >
+              <span style={{ fontSize: 15, color: a.color }}>{a.icon}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, marginTop: 1 }}>{a.label}</span>
+              <span style={{ fontSize: 9, color: ch >= 0 ? "#00D487" : "#FF5252" }}>
+                {ch >= 0 ? "+" : ""}{ch.toFixed(2)}%
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Info Bar */}
+      <div style={{
+        background: "#0D0E14", borderBottom: "1px solid #1A1C28",
+        padding: "7px 18px", display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap",
+      }}>
+        <div>
+          <span style={{ fontSize: 22, fontWeight: 900, color: selectedAsset.color, letterSpacing: 1 }}>
+            {priceStr}
+          </span>
+          <span style={{
+            marginLeft: 10, fontSize: 12, fontWeight: 700,
+            color: change >= 0 ? "#00D487" : "#FF5252",
+          }}>
+            {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(3)}%
+          </span>
+        </div>
+        {lastC && (
+          <>
+            <Stat label="HIGH" val={lastC.high >= 1000 ? lastC.high.toFixed(2) : lastC.high.toFixed(4)} color="#00D487" />
+            <Stat label="LOW" val={lastC.low >= 1000 ? lastC.low.toFixed(2) : lastC.low.toFixed(4)} color="#FF5252" />
+            <Stat label="BULL FVG" val={bullFvgs} color="#00D487" />
+            <Stat label="BEAR FVG" val={bearFvgs} color="#FF5252" />
+          </>
+        )}
+
+        {/* Timeframes */}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          {TIMEFRAMES.map((tf) => (
+            <button key={tf} onClick={() => setSelectedTF(tf)} style={{
+              background: selectedTF === tf ? "#1E2030" : "transparent",
+              border: `1px solid ${selectedTF === tf ? "#3A3D52" : "#1A1C28"}`,
+              color: selectedTF === tf ? "#FFD700" : "#666", borderRadius: 5,
+              padding: "3px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 11,
+            }}>{tf}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Toggles */}
+      <div style={{
+        background: "#0A0B0F", borderBottom: "1px solid #1A1C28",
+        padding: "5px 18px", display: "flex", gap: 14, alignItems: "center",
+      }}>
+        <Toggle label="Auto FVG" on={showFVG} onToggle={() => setShowFVG(!showFVG)} color="#FFD700" />
+        <Toggle label="Unfilled Only" on={showOnlyUnfilled} onToggle={() => setShowOnlyUnfilled(!showOnlyUnfilled)} color="#9945FF" />
+        <span style={{ fontSize: 10, color: "#444", marginLeft: 8 }}>Drag to pan · Scroll to navigate</span>
+      </div>
+
+      {/* Chart */}
+      <div
+        ref={containerRef}
+        style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 380, cursor: "crosshair" }}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
+        onWheel={onWheel}
+      >
+        <canvas
+          ref={canvasRef}
+          width={canvasSize.w}
+          height={canvasSize.h}
+          style={{ display: "block", width: "100%", height: "100%" }}
+        />
+
+        {/* FVG Legend */}
+        {showFVG && (
+          <div style={{
+            position: "absolute", bottom: 12, left: 18, display: "flex", gap: 14,
+            background: "rgba(10,11,15,0.85)", borderRadius: 8, padding: "6px 12px",
+            border: "1px solid #1E2030",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 14, height: 10, background: "rgba(0,212,135,0.2)", border: "1px dashed #00D487", display: "inline-block", borderRadius: 2 }} />
+              <span style={{ fontSize: 10, color: "#00D487" }}>Bullish FVG</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 14, height: 10, background: "rgba(255,82,82,0.2)", border: "1px dashed #FF5252", display: "inline-block", borderRadius: 2 }} />
+              <span style={{ fontSize: 10, color: "#FF5252" }}>Bearish FVG</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 14, height: 10, background: "rgba(150,150,150,0.1)", border: "1px dashed #555", display: "inline-block", borderRadius: 2 }} />
+              <span style={{ fontSize: 10, color: "#555" }}>Filled</span>
+            </div>
+          </div>
+        )}
+
+        {/* Brand watermark */}
+        <div style={{
+          position: "absolute", top: 14, left: 18, fontSize: 12, fontWeight: 700,
+          color: "rgba(255,215,0,0.08)", letterSpacing: 3, pointerEvents: "none",
+          userSelect: "none",
+        }}>MUNOOKING604SMC</div>
+      </div>
+
+      {/* FVG Table */}
+      <div style={{
+        background: "#0D0E14", borderTop: "1px solid #1A1C28",
+        padding: "8px 18px", maxHeight: 130, overflowY: "auto",
+      }}>
+        <div style={{ fontSize: 10, color: "#FFD700", letterSpacing: 2, marginBottom: 6 }}>
+          ▶ ACTIVE FVG ZONES — {selectedAsset.label}
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {allFvgs.filter((f) => !f.filled).slice(-16).map((fvg, i) => (
+            <div key={i} style={{
+              background: fvg.type === "bull" ? "rgba(0,212,135,0.08)" : "rgba(255,82,82,0.08)",
+              border: `1px solid ${fvg.type === "bull" ? "#00D48740" : "#FF525240"}`,
+              borderRadius: 6, padding: "4px 9px", fontSize: 10,
+            }}>
+              <span style={{ color: fvg.type === "bull" ? "#00D487" : "#FF5252", fontWeight: 700 }}>
+                {fvg.type === "bull" ? "▲ BULL" : "▼ BEAR"}
+              </span>
+              <span style={{ color: "#888", marginLeft: 6 }}>
+                {fvg.bottom >= 1000 ? fvg.bottom.toFixed(1) : fvg.bottom.toFixed(4)}–
+                {fvg.top >= 1000 ? fvg.top.toFixed(1) : fvg.top.toFixed(4)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        ::-webkit-scrollbar { height: 4px; width: 4px; }
+        ::-webkit-scrollbar-track { background: #0A0B0F; }
+        ::-webkit-scrollbar-thumb { background: #2A2D3E; border-radius: 2px; }
+      `}</style>
+    </div>
+  );
+}
+
+function Stat({ label, val, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 9, color: "#444", letterSpacing: 1 }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, color }}>{val}</div>
+    </div>
+  );
+}
+
+function Toggle({ label, on, onToggle, color }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer" }} onClick={onToggle}>
+      <div style={{
+        width: 32, height: 16, borderRadius: 8,
+        background: on ? color : "#1E2030", transition: "background 0.2s",
+        position: "relative", border: `1px solid ${on ? color : "#2A2D3E"}`,
+      }}>
+        <div style={{
+          width: 12, height: 12, borderRadius: "50%", background: "#fff",
+          position: "absolute", top: 1, left: on ? 17 : 1, transition: "left 0.2s",
+        }} />
+      </div>
+      <span style={{ fontSize: 10, color: on ? color : "#555", letterSpacing: 1 }}>{label}</span>
+    </div>
+  );
+}
